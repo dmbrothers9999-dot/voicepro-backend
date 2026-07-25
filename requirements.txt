@@ -6,3 +6,4 @@ scipy
 soundfile
 ffmpeg-python
 gunicorn
+psutil
