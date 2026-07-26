@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 from datetime import datetime
 from flask import Flask, request, send_file, jsonify, render_template
@@ -27,6 +28,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = os.path.join(os.path.expanduser('~'), 'VoiceProStudio_Uploads')
 PROCESSED_FOLDER = os.path.join(UPLOAD_FOLDER, 'processed')
+FEEDBACK_FILE = os.path.join(UPLOAD_FOLDER, 'feedback_logs.json')
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
@@ -55,19 +57,15 @@ def load_audio_ffmpeg(file_path):
         return audio, sr
 
 
-def remove_background_noise_engine(audio, sr, noise_pct=70):
-    """
-    Dedicated Background Noise Removal Engine
-    Uses Soft Spectral Subtraction to eliminate background hums, fans, and street noise.
-    """
-    # 1. Highpass Sub-Hum Filter (< 80Hz)
+def professional_vocal_enhancer(audio, sr, denoise_pct=70, vocal_boost_pct=50):
+    # STAGE 1: Highpass Sub-Hum Removal (< 80Hz)
     b_hp, a_hp = signal.butter(4, 80 / (sr / 2), btype='highpass')
     audio = signal.filtfilt(b_hp, a_hp, audio)
 
-    # 2. Soft Spectral Subtraction
-    if noise_pct > 0:
-        alpha = 1.0 + (noise_pct / 100.0) * 1.6
-        beta = max(0.08, 0.28 - (noise_pct / 100.0) * 0.20)
+    # STAGE 2: Soft Spectral Denoise (Vocal Floor Protection)
+    if denoise_pct > 0:
+        alpha = 1.0 + (denoise_pct / 100.0) * 1.5
+        beta = max(0.08, 0.28 - (denoise_pct / 100.0) * 0.20)
 
         n_fft, hop_length = 2048, 512
         f, t, Zxx = signal.stft(audio, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
@@ -88,32 +86,25 @@ def remove_background_noise_engine(audio, sr, noise_pct=70):
             cleaned_stft = magnitude * smoothed_mask * np.exp(1j * phase)
             _, audio = signal.istft(cleaned_stft, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
 
-    audio = np.nan_to_num(audio)
-    audio = np.clip(audio, -1.0, 1.0)
-    return audio
-
-
-def enhance_vocal_clarity_engine(audio, sr, vocal_boost_pct=50):
-    """
-    Dedicated AI Voice & Vocal Enhancer Engine
-    Boosts speech clarity (1.5kHz-4.5kHz) and normalizes loudness to -16 LUFS.
-    """
+    # STAGE 3: Vocal Clarity & Presence Boost (1.5kHz to 4.5kHz)
     if vocal_boost_pct > 0:
-        boost_gain = (vocal_boost_pct / 100.0) * 0.6
+        boost_gain = (vocal_boost_pct / 100.0) * 0.5
         b_bp, a_bp = signal.butter(2, [1500 / (sr / 2), 4500 / (sr / 2)], btype='bandpass')
         speech_band = signal.filtfilt(b_bp, a_bp, audio)
         audio = audio + (speech_band * boost_gain)
 
-    # Broadcast Loudness Normalization (-16 LUFS)
+    # STAGE 4: Loudness Normalization (-16 LUFS) & Soft Peak Limiter
     rms = np.sqrt(np.mean(audio ** 2)) + 1e-10
     current_lufs = 20 * np.log10(rms)
-    gain_db = -16.0 - current_lufs
+    target_lufs = -16.0
+    gain_db = target_lufs - current_lufs
     gain_linear = 10 ** (gain_db / 20.0)
 
     audio = audio * gain_linear
     audio = np.tanh(audio * 0.95)
     audio = np.nan_to_num(audio)
     audio = np.clip(audio, -1.0, 1.0)
+
     return audio
 
 
@@ -153,13 +144,14 @@ def handle_noise_reduction():
         intensity = data.get('intensity')
         
         if intensity == 'light':
-            noise_pct = 40.0
+            denoise_pct, vocal_boost_pct = 40.0, 30.0
         elif intensity == 'heavy':
-            noise_pct = 95.0
+            denoise_pct, vocal_boost_pct = 95.0, 70.0
         elif intensity == 'medium':
-            noise_pct = 70.0
+            denoise_pct, vocal_boost_pct = 70.0, 50.0
         else:
-            noise_pct = float(data.get('denoise_pct', 70))
+            denoise_pct = float(data.get('denoise_pct', 70))
+            vocal_boost_pct = float(data.get('vocal_boost_pct', 50))
 
         if not filename:
             return jsonify({'error': 'Filename missing!'}), 400
@@ -172,41 +164,7 @@ def handle_noise_reduction():
             return jsonify({'error': 'File not found. Please upload again.'}), 404
 
         audio, sr = load_audio_ffmpeg(path)
-        denoised_audio = remove_background_noise_engine(audio, sr, noise_pct)
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_name = f"denoised_{timestamp}.wav"
-        out_path = os.path.join(PROCESSED_FOLDER, out_name)
-
-        sf.write(out_path, denoised_audio, sr)
-        return jsonify({'success': True, 'denoised_file': out_name})
-
-    except Exception as e:
-        logger.error(f"Denoise Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/enhance-voice', methods=['POST', 'OPTIONS'])
-def handle_voice_enhancement():
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
-    try:
-        data = request.json or {}
-        filename = data.get('filename')
-        vocal_boost_pct = float(data.get('vocal_boost_pct', 50))
-
-        if not filename:
-            return jsonify({'error': 'Filename missing!'}), 400
-
-        path = os.path.join(PROCESSED_FOLDER, filename)
-        if not os.path.exists(path):
-            path = os.path.join(UPLOAD_FOLDER, filename)
-
-        if not os.path.exists(path):
-            return jsonify({'error': 'File not found. Please upload again.'}), 404
-
-        audio, sr = load_audio_ffmpeg(path)
-        enhanced_audio = enhance_vocal_clarity_engine(audio, sr, vocal_boost_pct)
+        enhanced_audio = professional_vocal_enhancer(audio, sr, denoise_pct, vocal_boost_pct)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         out_name = f"enhanced_{timestamp}.wav"
@@ -216,7 +174,7 @@ def handle_voice_enhancement():
         return jsonify({'success': True, 'denoised_file': out_name})
 
     except Exception as e:
-        logger.error(f"Voice Enhance Error: {e}")
+        logger.error(f"Enhance Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -282,6 +240,49 @@ def download_file(filename):
         download_name=filename,
         mimetype='application/octet-stream'
     )
+
+
+# ================= REAL WORKING FEEDBACK API =================
+@app.route('/api/feedback', methods=['POST', 'OPTIONS'])
+def save_feedback():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    try:
+        data = request.json or {}
+        name = data.get('name', 'Anonymous')
+        email = data.get('email', 'Not provided')
+        category = data.get('category', 'General Issue')
+        message = data.get('message', '')
+
+        if not message.strip():
+            return jsonify({'error': 'Feedback message is required'}), 400
+
+        entry = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'name': name,
+            'email': email,
+            'category': category,
+            'message': message
+        }
+
+        feedbacks = []
+        if os.path.exists(FEEDBACK_FILE):
+            try:
+                with open(FEEDBACK_FILE, 'r', encoding='utf-8') as f:
+                    feedbacks = json.load(f)
+            except Exception:
+                feedbacks = []
+
+        feedbacks.append(entry)
+        with open(FEEDBACK_FILE, 'w', encoding='utf-8') as f:
+            json.dump(feedbacks, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"💬 Feedback Saved from {name}: {message}")
+        return jsonify({'success': True, 'message': 'Thank you! Your feedback has been sent successfully.'})
+
+    except Exception as e:
+        logger.error(f"Feedback Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
