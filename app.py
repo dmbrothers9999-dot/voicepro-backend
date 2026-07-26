@@ -14,6 +14,9 @@ import ffmpeg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# SECRET ADMIN PASSWORD
+ADMIN_PASSWORD = "daini9999"
+
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
@@ -236,7 +239,7 @@ def download_file(filename):
     )
 
 
-# ================= REAL WORKING FEEDBACK API WITH ATTACHMENT =================
+# ================= CENTRALIZED CLOUD FEEDBACK ENGINE =================
 @app.route('/api/feedback', methods=['POST', 'OPTIONS'])
 def save_feedback():
     if request.method == 'OPTIONS':
@@ -281,7 +284,7 @@ def save_feedback():
         with open(FEEDBACK_FILE, 'w', encoding='utf-8') as f:
             json.dump(feedbacks, f, indent=2, ensure_ascii=False)
 
-        return jsonify({'success': True, 'message': 'Thank you! Your feedback and attachment have been received.'})
+        return jsonify({'success': True, 'message': 'Thank you! Your feedback has been sent directly to Daini Magician.'})
 
     except Exception as e:
         logger.error(f"Feedback Error: {e}")
@@ -296,9 +299,46 @@ def serve_feedback_file(filename):
     return jsonify({'error': 'File not found'}), 404
 
 
-# ================= SECRET ADMIN DASHBOARD FOR DAINI MAGICIAN =================
-@app.route('/admin/feedbacks')
+# ================= SECURE PASSWORD PROTECTED ADMIN PANEL =================
+@app.route('/admin/feedbacks', methods=['GET', 'POST'])
 def admin_feedbacks():
+    pass_code = request.args.get('pass') or request.form.get('pass')
+
+    # Security Lock: Check if Password Matches
+    if pass_code != ADMIN_PASSWORD:
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>VoicePro Studio - Admin Security Login</title>
+            <style>
+                body { font-family: 'Segoe UI', sans-serif; background: #090d20; color: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+                .login-box { background: rgba(30, 41, 59, 0.9); padding: 35px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.1); width: 340px; text-align: center; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
+                h2 { color: #a78bfa; margin-bottom: 8px; font-size: 22px; }
+                p { font-size: 12px; opacity: 0.7; margin-bottom: 20px; }
+                input { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #475569; border-radius: 10px; color: #fff; margin-bottom: 18px; box-sizing: border-box; text-align: center; font-size: 15px; letter-spacing: 2px; }
+                button { width: 100%; padding: 12px; background: linear-gradient(90deg, #8b5cf6, #6366f1); color: #fff; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 14px; }
+                button:hover { opacity: 0.9; }
+                .error { color: #ef4444; font-size: 12px; margin-top: 12px; }
+            </style>
+        </head>
+        <body>
+            <div class="login-box">
+                <h2>🔒 Admin Access Lock</h2>
+                <p>Authorized Personnel Only (Daini Magician)</p>
+                <form method="POST">
+                    <input type="password" name="pass" placeholder="Enter Admin Password" required autofocus>
+                    <button type="submit">🔓 Access Dashboard</button>
+                </form>
+                """ + ("<div class='error'>❌ Incorrect Password! Access Denied.</div>" if pass_code else "") + """
+            </div>
+        </body>
+        </html>
+        """, 200
+
+    # Password Correct: Display Admin Dashboard
     feedbacks = []
     if os.path.exists(FEEDBACK_FILE):
         try:
@@ -315,19 +355,23 @@ def admin_feedbacks():
         <title>VoicePro Admin - User Feedbacks</title>
         <style>
             body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #fff; padding: 25px; margin: 0; }
-            h1 { color: #a78bfa; border-bottom: 1px solid #334155; padding-bottom: 12px; font-size: 24px; }
-            .badge { background: #8b5cf6; padding: 4px 10px; border-radius: 12px; font-size: 12px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #1e293b; border-radius: 10px; overflow: hidden; }
-            th, td { padding: 12px 15px; border: 1px solid #334155; text-align: left; font-size: 13px; }
-            th { background: #334155; color: #c4b5fd; text-transform: uppercase; font-size: 11px; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 15px; }
+            h1 { color: #a78bfa; margin: 0; font-size: 24px; }
+            .badge { background: #8b5cf6; padding: 5px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #1e293b; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+            th, td { padding: 14px; border: 1px solid #334155; text-align: left; font-size: 13px; }
+            th { background: #334155; color: #c4b5fd; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
             tr:hover { background: rgba(255,255,255,0.03); }
             a { color: #38bdf8; text-decoration: none; font-weight: bold; }
             a:hover { text-decoration: underline; }
-            img { max-width: 140px; border-radius: 6px; border: 1px solid #475569; }
+            img { max-width: 150px; border-radius: 8px; border: 1px solid #475569; margin-top: 5px; }
         </style>
     </head>
     <body>
-        <h1>💬 VoicePro Admin - Bug Reports & User Feedbacks <span class="badge">""" + str(len(feedbacks)) + """ Received</span></h1>
+        <div class="header">
+            <h1>💬 VoicePro Admin Dashboard</h1>
+            <span class="badge">""" + str(len(feedbacks)) + """ Feedbacks Received</span>
+        </div>
         <table>
             <tr>
                 <th>Time</th>
@@ -335,23 +379,23 @@ def admin_feedbacks():
                 <th>Email</th>
                 <th>Category</th>
                 <th>Message / Bug Description</th>
-                <th>Attachment / Proof</th>
+                <th>Attachment / Screenshot Proof</th>
             </tr>
     """
 
     for fb in reversed(feedbacks):
-        attachment_html = "<span style='opacity:0.5;'>None</span>"
+        attachment_html = "<span style='opacity:0.4;'>None</span>"
         if fb.get('attachment'):
             att_url = fb['attachment']
             ext = att_url.split('.')[-1].lower()
             if ext in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
-                attachment_html = f'<a href="{att_url}" target="_blank"><img src="{att_url}" alt="Proof"><br>🖼️ View Full Image</a>'
+                attachment_html = f'<a href="{att_url}" target="_blank"><img src="{att_url}" alt="Screenshot"><br>🖼️ View Image</a>'
             else:
-                attachment_html = f'<a href="{att_url}" target="_blank">🎥 View Attached File</a>'
+                attachment_html = f'<a href="{att_url}" target="_blank">🎥 View File</a>'
 
         html += f"""
         <tr>
-            <td style="white-space:nowrap;">{fb.get('timestamp')}</td>
+            <td style="white-space:nowrap; opacity:0.8;">{fb.get('timestamp')}</td>
             <td><b>{fb.get('name')}</b></td>
             <td><a href="mailto:{fb.get('email')}">{fb.get('email')}</a></td>
             <td><span style="color:#fbbf24; font-weight:bold;">{fb.get('category')}</span></td>
