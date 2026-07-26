@@ -1,7 +1,8 @@
 import os
+import sys
 import logging
 from datetime import datetime
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, render_template
 from flask_cors import CORS
 import numpy as np
 import soundfile as sf
@@ -12,11 +13,19 @@ import ffmpeg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+# PyInstaller Path Resolver
+def get_resource_path(relative_path):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+template_dir = get_resource_path('templates')
+static_dir = get_resource_path('static')
+
+app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+UPLOAD_FOLDER = os.path.join(os.path.expanduser('~'), 'VoiceProStudio_Uploads')
 PROCESSED_FOLDER = os.path.join(UPLOAD_FOLDER, 'processed')
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -24,7 +33,6 @@ os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
 
 def load_audio_ffmpeg(file_path):
-    """Converts any audio file to 22050Hz mono WAV using FFmpeg"""
     temp_wav = file_path + "_temp.wav"
     try:
         (
@@ -47,66 +55,74 @@ def load_audio_ffmpeg(file_path):
         return audio, sr
 
 
-def process_clean_vocals(audio, sr, intensity='medium'):
+def remove_background_noise_engine(audio, sr, noise_pct=70):
     """
-    Soft Spectral Subtraction Algorithm with Spectral Floor
-    Preserves human voice formants while smoothly suppressing background noise.
+    Dedicated Background Noise Removal Engine
+    Uses Soft Spectral Subtraction to eliminate background hums, fans, and street noise.
     """
-    n_fft = 2048
-    hop_length = 512
+    # 1. Highpass Sub-Hum Filter (< 80Hz)
+    b_hp, a_hp = signal.butter(4, 80 / (sr / 2), btype='highpass')
+    audio = signal.filtfilt(b_hp, a_hp, audio)
 
-    # 1. Short-Time Fourier Transform (STFT)
-    f, t, Zxx = signal.stft(audio, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
-    magnitude = np.abs(Zxx)
-    phase = np.angle(Zxx)
+    # 2. Soft Spectral Subtraction
+    if noise_pct > 0:
+        alpha = 1.0 + (noise_pct / 100.0) * 1.6
+        beta = max(0.08, 0.28 - (noise_pct / 100.0) * 0.20)
 
-    if magnitude.shape[1] == 0:
-        return audio
+        n_fft, hop_length = 2048, 512
+        f, t, Zxx = signal.stft(audio, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
+        magnitude = np.abs(Zxx)
+        phase = np.angle(Zxx)
 
-    # 2. Smart Noise Floor Estimation (Find quietest 10% frames)
-    frame_energies = np.sum(magnitude ** 2, axis=0)
-    quiet_count = max(1, int(0.10 * len(frame_energies)))
-    quiet_indices = np.argsort(frame_energies)[:quiet_count]
-    noise_profile = np.mean(magnitude[:, quiet_indices], axis=1, keepdims=True)
+        if magnitude.shape[1] > 0:
+            frame_energies = np.sum(magnitude ** 2, axis=0)
+            quiet_count = max(1, int(0.10 * len(frame_energies)))
+            quiet_indices = np.argsort(frame_energies)[:quiet_count]
+            noise_profile = np.mean(magnitude[:, quiet_indices], axis=1, keepdims=True)
 
-    # 3. Parameters for preserving vocals
-    if intensity == 'light':
-        alpha = 1.1  # Subtraction multiplier
-        beta = 0.25  # Spectral floor (25% noise floor retained = zero vocal damage)
-    elif intensity == 'heavy':
-        alpha = 2.0
-        beta = 0.12  # 12% floor
-    else:  # medium
-        alpha = 1.5
-        beta = 0.18  # 18% floor (balanced)
+            subtracted = magnitude - (alpha * noise_profile)
+            gain_mask = subtracted / (magnitude + 1e-10)
+            gain_mask = np.maximum(gain_mask, beta)
 
-    # 4. Soft Subtraction Gain Mask
-    subtracted = magnitude - (alpha * noise_profile)
-    gain_mask = subtracted / (magnitude + 1e-10)
-    gain_mask = np.maximum(gain_mask, beta)  # Prevents vocal cutting
+            smoothed_mask = gaussian_filter(gain_mask, sigma=(1.0, 1.5))
+            cleaned_stft = magnitude * smoothed_mask * np.exp(1j * phase)
+            _, audio = signal.istft(cleaned_stft, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
 
-    # 5. Smooth the mask to remove robotic / metallic artifacts
-    smoothed_mask = gaussian_filter(gain_mask, sigma=(1.0, 1.5))
+    audio = np.nan_to_num(audio)
+    audio = np.clip(audio, -1.0, 1.0)
+    return audio
 
-    # 6. Reconstruct Audio via Inverse STFT
-    cleaned_stft = magnitude * smoothed_mask * np.exp(1j * phase)
-    _, cleaned_audio = signal.istft(cleaned_stft, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length)
 
-    # Match exact audio length
-    if len(cleaned_audio) > len(audio):
-        cleaned_audio = cleaned_audio[:len(audio)]
-    elif len(cleaned_audio) < len(audio):
-        cleaned_audio = np.pad(cleaned_audio, (0, len(audio) - len(cleaned_audio)))
+def enhance_vocal_clarity_engine(audio, sr, vocal_boost_pct=50):
+    """
+    Dedicated AI Voice & Vocal Enhancer Engine
+    Boosts speech clarity (1.5kHz-4.5kHz) and normalizes loudness to -16 LUFS.
+    """
+    if vocal_boost_pct > 0:
+        boost_gain = (vocal_boost_pct / 100.0) * 0.6
+        b_bp, a_bp = signal.butter(2, [1500 / (sr / 2), 4500 / (sr / 2)], btype='bandpass')
+        speech_band = signal.filtfilt(b_bp, a_bp, audio)
+        audio = audio + (speech_band * boost_gain)
 
-    cleaned_audio = np.nan_to_num(cleaned_audio)
-    cleaned_audio = np.clip(cleaned_audio, -1.0, 1.0)
+    # Broadcast Loudness Normalization (-16 LUFS)
+    rms = np.sqrt(np.mean(audio ** 2)) + 1e-10
+    current_lufs = 20 * np.log10(rms)
+    gain_db = -16.0 - current_lufs
+    gain_linear = 10 ** (gain_db / 20.0)
 
-    return cleaned_audio
+    audio = audio * gain_linear
+    audio = np.tanh(audio * 0.95)
+    audio = np.nan_to_num(audio)
+    audio = np.clip(audio, -1.0, 1.0)
+    return audio
 
 
 @app.route('/', methods=['GET', 'OPTIONS'])
 def home():
-    return jsonify({'status': 'VoicePro Server Online', 'developer': 'Daini Magician'})
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        return jsonify({'status': 'VoicePro Server Online', 'developer': 'Daini Magician'})
 
 
 @app.route('/api/upload', methods=['POST', 'OPTIONS'])
@@ -134,7 +150,16 @@ def handle_noise_reduction():
     try:
         data = request.json or {}
         filename = data.get('filename')
-        intensity = data.get('intensity', 'medium')
+        intensity = data.get('intensity')
+        
+        if intensity == 'light':
+            noise_pct = 40.0
+        elif intensity == 'heavy':
+            noise_pct = 95.0
+        elif intensity == 'medium':
+            noise_pct = 70.0
+        else:
+            noise_pct = float(data.get('denoise_pct', 70))
 
         if not filename:
             return jsonify({'error': 'Filename missing!'}), 400
@@ -146,21 +171,52 @@ def handle_noise_reduction():
         if not os.path.exists(path):
             return jsonify({'error': 'File not found. Please upload again.'}), 404
 
-        # Load audio safely
         audio, sr = load_audio_ffmpeg(path)
-
-        # Process clean vocals (Vocal Protection Active)
-        cleaned = process_clean_vocals(audio, sr, intensity)
+        denoised_audio = remove_background_noise_engine(audio, sr, noise_pct)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         out_name = f"denoised_{timestamp}.wav"
         out_path = os.path.join(PROCESSED_FOLDER, out_name)
 
-        sf.write(out_path, cleaned, sr)
+        sf.write(out_path, denoised_audio, sr)
         return jsonify({'success': True, 'denoised_file': out_name})
 
     except Exception as e:
         logger.error(f"Denoise Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/enhance-voice', methods=['POST', 'OPTIONS'])
+def handle_voice_enhancement():
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+    try:
+        data = request.json or {}
+        filename = data.get('filename')
+        vocal_boost_pct = float(data.get('vocal_boost_pct', 50))
+
+        if not filename:
+            return jsonify({'error': 'Filename missing!'}), 400
+
+        path = os.path.join(PROCESSED_FOLDER, filename)
+        if not os.path.exists(path):
+            path = os.path.join(UPLOAD_FOLDER, filename)
+
+        if not os.path.exists(path):
+            return jsonify({'error': 'File not found. Please upload again.'}), 404
+
+        audio, sr = load_audio_ffmpeg(path)
+        enhanced_audio = enhance_vocal_clarity_engine(audio, sr, vocal_boost_pct)
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_name = f"enhanced_{timestamp}.wav"
+        out_path = os.path.join(PROCESSED_FOLDER, out_name)
+
+        sf.write(out_path, enhanced_audio, sr)
+        return jsonify({'success': True, 'denoised_file': out_name})
+
+    except Exception as e:
+        logger.error(f"Voice Enhance Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -205,7 +261,6 @@ def handle_export():
         return jsonify({'success': True, 'output_file': out_name})
 
     except Exception as e:
-        logger.error(f"Export Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -231,4 +286,4 @@ def download_file(filename):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='127.0.0.1', port=port, debug=False)
